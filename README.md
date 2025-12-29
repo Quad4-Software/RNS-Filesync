@@ -163,3 +163,11 @@ RNS FileSync watches a directory on your device. When you add or change a file, 
 - `file_complete` - Signal transfer completion with final hash
 - `file_update` - Notify peers of local file change
 - `file_deletion` - Notify peers of local file deletion
+
+## License
+
+RNS FileSync is licensed under [BSD-2-Clause](LICENSE).
+
+## Dependencies
+
+`rns` (Reticulum) - [Reticulum License](https://raw.githubusercontent.com/markqvist/Reticulum/refs/heads/master/LICENSE)
