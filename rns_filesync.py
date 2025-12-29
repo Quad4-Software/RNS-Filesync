@@ -43,6 +43,10 @@ peer_permissions = {}
 permissions_lock = threading.Lock()
 whitelist_enabled = False
 
+desired_peers = set()
+desired_peers_lock = threading.Lock()
+peer_reconnect_active = False
+
 transfer_stats = {
     "last_transfer_bytes": 0,
     "last_transfer_time": 0,
@@ -405,7 +409,7 @@ class SimpleTUI:
 
         self.move_cursor(6, 3)
         sys.stdout.write(
-            f"{Colors.BRIGHT_BLACK}Commands: status | peers | browse <peer> | logs | download <file> | quit{Colors.RESET}",
+            f"{Colors.BRIGHT_BLACK}Commands: status | peers | connect <hash> | disconnect <#> | browse <peer> | logs | quit{Colors.RESET}",
         )
 
         return status_height
@@ -1041,6 +1045,11 @@ def peer_connected(link):
 
         if tui:
             tui.update_status(peers=len(connected_peers))
+    
+    if identity_hash:
+        dest_hash = link.destination.hash
+        with desired_peers_lock:
+            desired_peers.add((RNS.hexrep(dest_hash, delimit=False), RNS.hexrep(identity_hash, delimit=False)))
 
     link.set_link_closed_callback(peer_disconnected)
     link.set_packet_callback(packet_received)
@@ -1048,7 +1057,6 @@ def peer_connected(link):
     link.set_resource_callback(resource_callback)
     link.set_resource_started_callback(resource_started)
     link.set_resource_concluded_callback(resource_concluded)
-    link.download_buffers = {}
     link.upload_buffers = {}
 
     if (
@@ -1077,18 +1085,26 @@ def peer_disconnected(link):
 
     try:
         remote_identity = link.get_remote_identity()
+        dest_hash = link.destination.hash
+        
         if remote_identity:
+            identity_hash = remote_identity.hash
             RNS.log(
-                f"Peer disconnected: {RNS.prettyhexrep(remote_identity.hash)}",
+                f"Peer disconnected: {RNS.prettyhexrep(identity_hash)} (will attempt reconnect)",
                 RNS.LOG_INFO,
             )
+            
+            with desired_peers_lock:
+                peer_tuple = (RNS.hexrep(dest_hash, delimit=False), RNS.hexrep(identity_hash, delimit=False))
+                if peer_tuple in desired_peers:
+                    RNS.log(f"Peer {RNS.prettyhexrep(identity_hash)} is in desired peers list", RNS.LOG_DEBUG)
         else:
             RNS.log(
-                f"Peer disconnected: {RNS.prettyhexrep(link.destination.hash)}",
+                f"Peer disconnected: {RNS.prettyhexrep(dest_hash)}",
                 RNS.LOG_INFO,
             )
-    except Exception:
-        RNS.log("Peer disconnected", RNS.LOG_INFO)
+    except Exception as e:
+        RNS.log(f"Peer disconnected: {e}", RNS.LOG_DEBUG)
 
 
 def send_file_list_to_peer(link, browser_mode=False):
@@ -1193,10 +1209,6 @@ def packet_received(message, packet):
             handle_block_hashes_response(data, packet.link)
         elif msg_type == "delta_request":
             handle_delta_request(data, packet.link)
-        elif msg_type == "file_chunk":
-            handle_file_chunk(data, packet.link)
-        elif msg_type == "file_complete":
-            handle_file_complete(data, packet.link)
         elif msg_type == "empty_file":
             handle_empty_file(data, packet.link)
         elif msg_type == "file_update":
@@ -1525,71 +1537,41 @@ def handle_delta_request(data, link):
             RNS.LOG_INFO,
         )
 
-        start_time = time.time()
-        bytes_sent = 0
-
+        import io
+        delta_buffer = io.BytesIO()
+        
         with open(full_path, "rb") as f:
             for block_num in blocks_to_send:
                 f.seek(block_num * BLOCK_SIZE)
                 block_data = f.read(BLOCK_SIZE)
-                bytes_sent += len(block_data)
+                delta_buffer.write(block_data)
 
-                sub_chunk_count = (len(block_data) + MAX_PACKET_DATA_SIZE - 1) // MAX_PACKET_DATA_SIZE
-
-                for sub_idx in range(sub_chunk_count):
-                    start_pos = sub_idx * MAX_PACKET_DATA_SIZE
-                    end_pos = min(start_pos + MAX_PACKET_DATA_SIZE, len(block_data))
-                    sub_chunk_data = block_data[start_pos:end_pos]
-
-                    chunk_data = umsgpack.packb(
-                        {
-                            "type": "file_chunk",
-                            "path": filepath,
-                            "chunk_num": block_num,
-                            "sub_chunk_idx": sub_idx,
-                            "sub_chunk_total": sub_chunk_count,
-                            "data": sub_chunk_data,
-                            "size": file_size,
-                            "mode": "delta",
-                            "total_blocks": len(local_blocks),
-                        },
-                    )
-
-                    packet = RNS.Packet(link, chunk_data)
-                    packet.send()
-                    time.sleep(0.01)
-
-        end_time = time.time()
-        transfer_time = end_time - start_time
-
-        with transfer_stats_lock:
-            if transfer_time > 0:
-                transfer_stats["current_speed"] = bytes_sent / transfer_time
-                transfer_stats["last_transfer_time"] = transfer_time
-                transfer_stats["last_transfer_bytes"] = bytes_sent
-
-            if tui:
-                tui.update_status(speed=transfer_stats["current_speed"])
-
+        delta_buffer.seek(0)
+        
         with file_hashes_lock:
             file_hash = file_hashes.get(filepath, {}).get("hash")
 
-        complete_data = umsgpack.packb(
-            {
-                "type": "file_complete",
-                "path": filepath,
-                "hash": file_hash,
-                "mode": "delta",
-            },
+        metadata = {
+            "filepath": filepath.encode("utf-8"),
+            "hash": file_hash.encode("utf-8") if file_hash else b"",
+            "mode": "delta",
+            "blocks": blocks_to_send
+        }
+
+        def send_concluded_callback(resource):
+            with active_outgoing_transfers_lock:
+                active_outgoing_transfers.pop(transfer_key, None)
+            if resource.status == RNS.Resource.COMPLETE:
+                RNS.log(f"Delta for {filepath} sent successfully", RNS.LOG_INFO)
+            else:
+                RNS.log(f"Delta for {filepath} send failed", RNS.LOG_ERROR)
+
+        RNS.Resource(
+            delta_buffer,
+            link,
+            metadata=metadata,
+            callback=send_concluded_callback
         )
-
-        packet = RNS.Packet(link, complete_data)
-        packet.send()
-
-        RNS.log(f"Delta sent for {filepath}", RNS.LOG_VERBOSE)
-
-        with active_outgoing_transfers_lock:
-            active_outgoing_transfers.pop(transfer_key, None)
 
     except Exception as e:
         RNS.log(f"Error sending delta for {filepath}: {e}", RNS.LOG_ERROR)
@@ -1742,9 +1724,27 @@ def resource_concluded(resource):
         os.makedirs(dir_path, exist_ok=True)
 
     try:
-        shutil.move(resource.data.name, full_path)
+        if resource.metadata.get("mode") == "delta":
+            block_list = resource.metadata.get("blocks", [])
+            RNS.log(f"Applying {len(block_list)} delta blocks to {filepath}", RNS.LOG_INFO)
+            
+            with open(full_path, "r+b") as f:
+                # Reticulum Resource data is already a file-like object
+                resource.data.seek(0)
+                for block_num in block_list:
+                    block_data = resource.data.read(BLOCK_SIZE)
+                    if not block_data:
+                        break
+                    f.seek(block_num * BLOCK_SIZE)
+                    f.write(block_data)
+        else:
+            shutil.move(resource.data.name, full_path)
+
         file_size = os.path.getsize(full_path)
-        RNS.log(f"Received file {filepath} ({file_size} bytes)", RNS.LOG_INFO)
+        if resource.metadata.get("mode") == "delta":
+            RNS.log(f"Delta applied to {filepath}", RNS.LOG_INFO)
+        else:
+            RNS.log(f"Received file {filepath} ({file_size} bytes)", RNS.LOG_INFO)
 
         actual_hash = hash_file(full_path)
 
@@ -1840,209 +1840,6 @@ def handle_block_hashes_response(data, link):
         link: RNS Link object for the peer.
 
     """
-
-
-def handle_file_chunk(data, link):
-    """Handle file chunk received from a peer.
-
-    Args:
-        data: Packet data dictionary containing chunk information.
-        link: RNS Link object for the peer.
-
-    """
-    filepath = data.get("path")
-    chunk_num = data.get("chunk_num")
-    chunk_data = data.get("data")
-    mode = data.get("mode", "full")
-    sub_chunk_idx = data.get("sub_chunk_idx", 0)
-    sub_chunk_total = data.get("sub_chunk_total", 1)
-
-    if filepath not in link.download_buffers:
-        link.download_buffers[filepath] = {
-            "chunks": {},
-            "mode": mode,
-            "size": data.get("size", 0),
-            "total_blocks": data.get("total_blocks", 0),
-        }
-
-    if chunk_num not in link.download_buffers[filepath]["chunks"]:
-        link.download_buffers[filepath]["chunks"][chunk_num] = {
-            "sub_chunks": {},
-            "total_sub_chunks": sub_chunk_total,
-        }
-
-    link.download_buffers[filepath]["chunks"][chunk_num]["sub_chunks"][sub_chunk_idx] = chunk_data
-    link.download_buffers[filepath]["chunks"][chunk_num]["total_sub_chunks"] = sub_chunk_total
-
-    if mode == "delta":
-        RNS.log(
-            f"Received delta block {chunk_num} sub-chunk {sub_chunk_idx + 1}/{sub_chunk_total} for {filepath}",
-            RNS.LOG_DEBUG,
-        )
-    else:
-        RNS.log(
-            f"Received chunk {chunk_num} sub-chunk {sub_chunk_idx + 1}/{sub_chunk_total} for {filepath}",
-            RNS.LOG_DEBUG,
-        )
-
-
-def handle_file_complete(data, link):
-    """Handle file transfer completion notification.
-
-    Args:
-        data: Packet data dictionary containing file path and hash.
-        link: RNS Link object for the peer.
-
-    """
-    filepath = data.get("path")
-    expected_hash = data.get("hash")
-    mode = data.get("mode", "full")
-
-    if filepath not in link.download_buffers:
-        RNS.log(f"No download buffer for {filepath}, waiting for chunks...", RNS.LOG_DEBUG)
-        time.sleep(0.5)
-        if filepath not in link.download_buffers:
-            RNS.log(f"No download buffer for {filepath} after wait", RNS.LOG_WARNING)
-            return
-
-    try:
-        remote_identity = link.get_remote_identity()
-        if remote_identity and whitelist_enabled:
-            if not check_permission(remote_identity.hash, "write"):
-                RNS.log(
-                    f"Peer {RNS.prettyhexrep(remote_identity.hash)} does not have write permission for {filepath}",
-                    RNS.LOG_WARNING,
-                )
-                if filepath in link.download_buffers:
-                    del link.download_buffers[filepath]
-                return
-    except Exception as e:
-        RNS.log(f"Error checking permissions: {e}", RNS.LOG_DEBUG)
-
-    if filepath not in link.download_buffers:
-        RNS.log(f"No download buffer for {filepath}", RNS.LOG_WARNING)
-        return
-
-    try:
-        buffer_info = link.download_buffers[filepath]
-
-        reassembled_chunks = []
-        for chunk_num in sorted(buffer_info["chunks"].keys()):
-            chunk_info = buffer_info["chunks"][chunk_num]
-            sub_chunks = chunk_info["sub_chunks"]
-            total_sub_chunks = chunk_info["total_sub_chunks"]
-
-            if len(sub_chunks) < total_sub_chunks:
-                RNS.log(
-                    f"Incomplete sub-chunks for block {chunk_num}: {len(sub_chunks)}/{total_sub_chunks}",
-                    RNS.LOG_WARNING,
-                )
-                continue
-
-            complete_chunk = b"".join([sub_chunks[i] for i in sorted(sub_chunks.keys())])
-            reassembled_chunks.append((chunk_num, complete_chunk))
-
-        chunks = reassembled_chunks
-        expected_size = buffer_info.get("size", 0)
-
-        if mode != "delta" and expected_size > 0:
-            total_received = sum(len(chunk[1]) for chunk in chunks)
-            expected_chunks = (expected_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-
-            if len(chunks) < expected_chunks or total_received < expected_size:
-                RNS.log(
-                    f"File incomplete: {filepath} - received {len(chunks)}/{expected_chunks} chunks, "
-                    f"{total_received}/{expected_size} bytes. Waiting for remaining chunks...",
-                    RNS.LOG_WARNING,
-                )
-                time.sleep(1.0)
-
-                reassembled_chunks = []
-                for chunk_num in sorted(link.download_buffers[filepath]["chunks"].keys()):
-                    chunk_info = link.download_buffers[filepath]["chunks"][chunk_num]
-                    sub_chunks = chunk_info["sub_chunks"]
-                    total_sub_chunks = chunk_info["total_sub_chunks"]
-
-                    if len(sub_chunks) == total_sub_chunks:
-                        complete_chunk = b"".join([sub_chunks[i] for i in sorted(sub_chunks.keys())])
-                        reassembled_chunks.append((chunk_num, complete_chunk))
-
-                chunks = reassembled_chunks
-                total_received = sum(len(chunk[1]) for chunk in chunks)
-
-                if len(chunks) < expected_chunks or total_received < expected_size:
-                    RNS.log(
-                        f"File still incomplete after wait: {filepath} - received {len(chunks)}/{expected_chunks} chunks, "
-                        f"{total_received}/{expected_size} bytes. Requesting file again...",
-                        RNS.LOG_ERROR,
-                    )
-                    del link.download_buffers[filepath]
-                    request_file(link, filepath)
-                    return
-
-        full_path = os.path.join(sync_directory, filepath)
-        dir_path = os.path.dirname(full_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-
-        if mode == "delta":
-            if not os.path.exists(full_path):
-                RNS.log(
-                    f"Delta received but base file missing: {filepath}", RNS.LOG_ERROR,
-                )
-                del link.download_buffers[filepath]
-                return
-
-            with open(full_path, "r+b") as f:
-                for chunk_num, chunk_data in chunks:
-                    f.seek(chunk_num * BLOCK_SIZE)
-                    f.write(chunk_data)
-
-            RNS.log(f"Applied {len(chunks)} delta blocks to {filepath}", RNS.LOG_INFO)
-        else:
-            file_data = b"".join([chunk[1] for chunk in chunks])
-
-            if expected_size > 0 and len(file_data) != expected_size:
-                RNS.log(
-                    f"File size mismatch: {filepath} - expected {expected_size} bytes, got {len(file_data)} bytes",
-                    RNS.LOG_ERROR,
-                )
-                del link.download_buffers[filepath]
-                return
-
-            with open(full_path, "wb") as f:
-                f.write(file_data)
-
-            RNS.log(
-                f"Received full file {filepath} ({len(file_data)} bytes)", RNS.LOG_INFO,
-            )
-
-        actual_hash = hash_file(full_path)
-
-        if actual_hash == expected_hash:
-            RNS.log(f"File {filepath} verified successfully", RNS.LOG_VERBOSE)
-
-            with file_hashes_lock:
-                file_hashes[filepath] = {
-                    "hash": actual_hash,
-                    "size": os.path.getsize(full_path),
-                    "mtime": time.time(),
-                }
-            save_hash_db(sync_directory)
-
-            broadcast_file_update(filepath, exclude_link=link)
-        else:
-            RNS.log(
-                f"Hash mismatch for {filepath}! Expected {expected_hash}, got {actual_hash}",
-                RNS.LOG_ERROR,
-            )
-            if mode != "delta":
-                os.remove(full_path)
-
-        del link.download_buffers[filepath]
-
-    except Exception as e:
-        RNS.log(f"Error completing file {filepath}: {e}", RNS.LOG_ERROR)
 
 
 def handle_file_update_notification(data, link):
@@ -2189,6 +1986,48 @@ def handle_file_deletion(data, link):
         save_hash_db(sync_directory)
 
 
+def peer_reconnection_loop():
+    """Monitor desired peers and reconnect if disconnected."""
+    global peer_reconnect_active
+    
+    reconnect_interval = 10
+    
+    while peer_reconnect_active:
+        try:
+            time.sleep(reconnect_interval)
+            
+            with desired_peers_lock:
+                peers_to_check = list(desired_peers)
+            
+            if not peers_to_check:
+                continue
+            
+            with connected_peers_lock:
+                connected_hashes = set()
+                for link in connected_peers:
+                    if link.status == RNS.Link.ACTIVE:
+                        try:
+                            remote_id = link.get_remote_identity()
+                            if remote_id:
+                                connected_hashes.add(RNS.hexrep(remote_id.hash, delimit=False))
+                        except Exception:
+                            pass
+            
+            for dest_hash, identity_hash in peers_to_check:
+                if identity_hash not in connected_hashes:
+                    RNS.log(f"Peer {identity_hash[:16]}... disconnected, attempting reconnect", RNS.LOG_INFO)
+                    threading.Thread(
+                        target=connect_to_peer,
+                        args=(dest_hash,),
+                        daemon=True,
+                    ).start()
+                    time.sleep(1)
+        
+        except Exception as e:
+            RNS.log(f"Error in peer reconnection loop: {e}", RNS.LOG_ERROR)
+            time.sleep(5)
+
+
 def file_monitor():
     """Monitor directory for file changes and sync with peers."""
     global file_monitor_active
@@ -2295,7 +2134,6 @@ def connect_to_peer(peer_hash_hex):
         established_callback=peer_connected,
         closed_callback=peer_disconnected,
     )
-    link.download_buffers = {}
     link.upload_buffers = {}
 
     timeout = 10
@@ -2325,6 +2163,12 @@ def connect_to_peer(peer_hash_hex):
     try:
         remote_identity = link.get_remote_identity()
         identity_hash = remote_identity.hash if remote_identity else None
+        
+        if identity_hash:
+            dest_hash = link.destination.hash
+            with desired_peers_lock:
+                desired_peers.add((RNS.hexrep(dest_hash, delimit=False), RNS.hexrep(identity_hash, delimit=False)))
+                RNS.log(f"Added peer to desired peers: {RNS.prettyhexrep(identity_hash)}", RNS.LOG_DEBUG)
 
         if (
             (identity_hash and check_permission(identity_hash, "read"))
@@ -2393,6 +2237,7 @@ def start_peer(
         peer_destination, \
         sync_directory, \
         file_monitor_active, \
+        peer_reconnect_active, \
         tui, \
         original_rns_log
 
@@ -2464,6 +2309,12 @@ def start_peer(
         target=announce_loop, args=(peer_destination, announce_interval), daemon=True,
     )
     announce_thread.start()
+    
+    global peer_reconnect_active
+    peer_reconnect_active = True
+    reconnect_thread = threading.Thread(target=peer_reconnection_loop, daemon=True)
+    reconnect_thread.start()
+    RNS.log("Peer reconnection enabled (checking every 10 seconds)", RNS.LOG_INFO)
 
     if peers:
         for peer_hash in peers:
@@ -2472,9 +2323,10 @@ def start_peer(
                 target=connect_to_peer, args=(peer_hash,), daemon=True,
             )
             connect_thread.start()
+            time.sleep(0.5)
 
     RNS.log(
-        "Commands: 'peers' - show peers, 'status' - show stats, 'connect <hash>' - connect to peer, 'quit' - exit",
+        "Commands: 'peers' - show peers, 'status' - show stats, 'connect <hash>' - connect, 'disconnect <#>' - disconnect peer, 'quit' - exit",
         RNS.LOG_INFO,
     )
 
@@ -2711,9 +2563,40 @@ def start_peer(
                         "Not in browser mode. Use 'browse <peer>' first", RNS.LOG_INFO,
                     )
 
+            elif entered.lower().startswith("disconnect "):
+                peer_idx_str = entered[11:].strip()
+                try:
+                    with connected_peers_lock:
+                        if not connected_peers:
+                            RNS.log("No connected peers to disconnect", RNS.LOG_WARNING)
+                        else:
+                            try:
+                                peer_idx = int(peer_idx_str)
+                                if 0 <= peer_idx < len(connected_peers):
+                                    link = connected_peers[peer_idx]
+                                    remote_id = link.get_remote_identity()
+                                    dest_hash = link.destination.hash
+                                    identity_hash = remote_id.hash if remote_id else None
+                                    
+                                    if identity_hash:
+                                        with desired_peers_lock:
+                                            peer_tuple = (RNS.hexrep(dest_hash, delimit=False), RNS.hexrep(identity_hash, delimit=False))
+                                            if peer_tuple in desired_peers:
+                                                desired_peers.remove(peer_tuple)
+                                                RNS.log(f"Removed peer {RNS.prettyhexrep(identity_hash)} from auto-reconnect", RNS.LOG_INFO)
+                                    
+                                    link.teardown()
+                                    RNS.log(f"Disconnected from peer {peer_idx}", RNS.LOG_INFO)
+                                else:
+                                    RNS.log(f"Invalid peer index. Use 'peers' to see available peers (0-{len(connected_peers) - 1})", RNS.LOG_WARNING)
+                            except ValueError:
+                                RNS.log("Usage: disconnect <peer_index>", RNS.LOG_INFO)
+                except Exception as e:
+                    RNS.log(f"Error disconnecting peer: {e}", RNS.LOG_ERROR)
+
             elif entered:
                 RNS.log(
-                    "Unknown command. Available: peers, status, connect <hash>, browse <peer>, download <file>, download_all, logs, files, announce, quit",
+                    "Unknown command. Available: peers, status, connect <hash>, disconnect <index>, browse <peer>, download <file>, download_all, logs, files, announce, quit",
                     RNS.LOG_INFO,
                 )
 
