@@ -233,6 +233,15 @@ class SimpleTUI:
             level: Log level (string or RNS log constant).
 
         """
+        # Filter out debug/verbose messages in TUI unless explicitly requested
+        if level in ("VERBOSE", RNS.LOG_VERBOSE, "DEBUG", RNS.LOG_DEBUG):
+             # Only show if loglevel allows it
+             if isinstance(level, int) and RNS.loglevel < level:
+                 return
+             if isinstance(level, str) and RNS.loglevel < RNS.LOG_VERBOSE: # Assume str levels are verbose/debug if named so
+                 if level in ("VERBOSE", "DEBUG"):
+                     return
+
         with self.log_lock:
             timestamp = time.strftime("%H:%M:%S")
 
@@ -634,19 +643,16 @@ class SimpleTUI:
         if not self.enabled:
             return
 
+        # Always save cursor position before any drawing operations
+        if not _IS_WINDOWS:
+            sys.stdout.write("\033[s")  # save cursor position
+
         if full_clear:
             refresh_input = True
-
-        saved_cursor = False
-        if not refresh_input and not _IS_WINDOWS:
-            sys.stdout.write("\033[s")  # save cursor position
-            saved_cursor = True
+            self.clear_screen()
 
         self.update_terminal_size()
         self.hide_cursor()
-
-        if full_clear:
-            self.clear_screen()
 
         status_end = self.draw_status_area()
         content_start = status_end + 1
@@ -663,8 +669,11 @@ class SimpleTUI:
             self.draw_input_area(restore_input=True)
 
         self.show_cursor()
-        if saved_cursor:
+
+        # Restore cursor position after all drawing is done
+        if not _IS_WINDOWS:
             sys.stdout.write("\033[u")  # restore cursor position
+
         sys.stdout.flush()
 
     def start_refresh_timer(self):
@@ -732,7 +741,8 @@ def rns_log_hook(message, level, _override_destination=False):
     """
     if tui and tui.enabled:
         tui.add_log(message, level)
-    if original_rns_log:
+    # Do not print to stdout if TUI is enabled to prevent screen corruption
+    elif original_rns_log:
         original_rns_log(message, level, _override_destination)
 
 
@@ -1819,17 +1829,32 @@ def resource_started(resource):
         RNS.LOG_INFO,
     )
 
-    start_time = time.time()
+    # Initialize sliding window stats for this resource
+    res_stats = []
+    STATS_MAX = 32
 
     def progress_callback(res):
         if tui:
             with transfer_stats_lock:
+                now = time.time()
                 progress = res.get_progress()
                 current_bytes = int(progress * total_size)
-                elapsed = time.time() - start_time
-                if elapsed > 0:
-                    speed = current_bytes / elapsed
-                    tui.update_status(speed=speed)
+
+                # Sliding window calculation
+                res_stats.append((now, current_bytes))
+                while len(res_stats) > STATS_MAX:
+                    res_stats.pop(0)
+
+                speed = 0
+                if len(res_stats) > 1:
+                    span = now - res_stats[0][0]
+                    diff = current_bytes - res_stats[0][1]
+                    if span > 0.1: # Avoid division by zero and tiny intervals
+                         speed = diff / span
+
+                transfer_stats["last_transfer_bytes"] = current_bytes
+                transfer_stats["current_speed"] = speed
+                tui.update_status(speed=speed)
 
     resource.progress_callback(progress_callback)
 
@@ -1933,6 +1958,7 @@ def resource_concluded(resource):
                 return
     except Exception as e:
         RNS.log(f"Error checking permissions: {e}", RNS.LOG_DEBUG)
+
 
     full_path = os.path.join(sync_directory, filepath)
     dir_path = os.path.dirname(full_path)
@@ -2215,6 +2241,70 @@ def handle_file_deletion(data, link):
         save_hash_db(sync_directory)
 
 
+def _peer_reconnection_iteration():
+    """Perform a single iteration of the peer reconnection monitor."""
+    try:
+        with desired_peers_lock:
+            peers_to_check = list(desired_peers)
+
+        if not peers_to_check:
+            return
+
+        with connected_peers_lock:
+            connected_hashes = set()
+            connected_dest_hashes = set()
+            for link in connected_peers:
+                if link.status in (RNS.Link.ACTIVE, RNS.Link.HANDSHAKE):
+                    try:
+                        connected_dest_hashes.add(
+                            RNS.hexrep(link.destination.hash, delimit=False),
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        remote_id = link.get_remote_identity()
+                        if remote_id:
+                            connected_hashes.add(
+                                RNS.hexrep(remote_id.hash, delimit=False),
+                            )
+                    except Exception:
+                        pass
+
+        for dest_hash, identity_hash in peers_to_check:
+            if (
+                identity_hash not in connected_hashes
+                and dest_hash not in connected_dest_hashes
+            ):
+                with active_connection_attempts_lock:
+                    if dest_hash in active_connection_attempts:
+                        continue
+                    active_connection_attempts.add(dest_hash)
+
+                RNS.log(
+                    f"Peer {identity_hash[:16]}... disconnected, attempting reconnect",
+                    RNS.LOG_INFO,
+                )
+
+                def reconnect_job(d_hash):
+                    try:
+                        connect_to_peer(d_hash)
+                    finally:
+                        with active_connection_attempts_lock:
+                            active_connection_attempts.discard(d_hash)
+
+                threading.Thread(
+                    target=reconnect_job,
+                    args=(dest_hash,),
+                    daemon=True,
+                ).start()
+                time.sleep(1)
+
+    except Exception as e:
+        RNS.log(f"Error in peer reconnection loop: {e}", RNS.LOG_ERROR)
+        time.sleep(5)
+
+
 def peer_reconnection_loop():
     """Monitor desired peers and reconnect if disconnected."""
     global peer_reconnect_active
@@ -2222,68 +2312,57 @@ def peer_reconnection_loop():
     reconnect_interval = 10
 
     while peer_reconnect_active:
-        try:
-            time.sleep(reconnect_interval)
+        _peer_reconnection_iteration()
+        time.sleep(reconnect_interval)
 
-            with desired_peers_lock:
-                peers_to_check = list(desired_peers)
 
-            if not peers_to_check:
-                continue
+def _file_monitor_iteration():
+    """Perform a single iteration of the file monitor."""
+    try:
+        current_files = scan_directory(sync_directory)
 
-            with connected_peers_lock:
-                connected_hashes = set()
-                connected_dest_hashes = set()
-                for link in connected_peers:
-                    if link.status in (RNS.Link.ACTIVE, RNS.Link.HANDSHAKE):
-                        try:
-                            connected_dest_hashes.add(
-                                RNS.hexrep(link.destination.hash, delimit=False),
-                            )
-                        except Exception:
-                            pass
+        with file_hashes_lock:
+            old_files = set(file_hashes.keys())
+            new_files = set(current_files.keys())
 
-                        try:
-                            remote_id = link.get_remote_identity()
-                            if remote_id:
-                                connected_hashes.add(
-                                    RNS.hexrep(remote_id.hash, delimit=False),
-                                )
-                        except Exception:
-                            pass
+            added = new_files - old_files
+            removed = old_files - new_files
+            potentially_modified = old_files & new_files
 
-            for dest_hash, identity_hash in peers_to_check:
-                if (
-                    identity_hash not in connected_hashes
-                    and dest_hash not in connected_dest_hashes
-                ):
-                    with active_connection_attempts_lock:
-                        if dest_hash in active_connection_attempts:
-                            continue
-                        active_connection_attempts.add(dest_hash)
+            for filepath in added:
+                RNS.log(f"New file detected: {filepath}", RNS.LOG_INFO)
+                file_hashes[filepath] = current_files[filepath]
 
-                    RNS.log(
-                        f"Peer {identity_hash[:16]}... disconnected, attempting reconnect",
-                        RNS.LOG_INFO,
-                    )
+            for filepath in removed:
+                RNS.log(f"File removed: {filepath}", RNS.LOG_INFO)
+                del file_hashes[filepath]
 
-                    def reconnect_job(d_hash):
-                        try:
-                            connect_to_peer(d_hash)
-                        finally:
-                            with active_connection_attempts_lock:
-                                active_connection_attempts.discard(d_hash)
+            modified = []
+            for filepath in potentially_modified:
+                if file_hashes[filepath]["hash"] != current_files[filepath]["hash"]:
+                    RNS.log(f"File modified: {filepath}", RNS.LOG_INFO)
+                    file_hashes[filepath] = current_files[filepath]
+                    modified.append(filepath)
 
-                    threading.Thread(
-                        target=reconnect_job,
-                        args=(dest_hash,),
-                        daemon=True,
-                    ).start()
-                    time.sleep(1)
+        if added or removed or modified:
+            save_hash_db(sync_directory)
 
-        except Exception as e:
-            RNS.log(f"Error in peer reconnection loop: {e}", RNS.LOG_ERROR)
-            time.sleep(5)
+            if tui:
+                tui.update_status(files=len(file_hashes))
+                tui.update_file_list(sync_directory)
+
+            for filepath in added:
+                broadcast_file_update(filepath)
+
+            for filepath in removed:
+                broadcast_file_deletion(filepath)
+
+            for filepath in modified:
+                broadcast_file_update(filepath)
+
+    except Exception as e:
+        RNS.log(f"File monitor error: {e}", RNS.LOG_DEBUG)
+        time.sleep(1)
 
 
 def file_monitor():
@@ -2291,53 +2370,8 @@ def file_monitor():
     global file_monitor_active
 
     while file_monitor_active:
-        try:
-            current_files = scan_directory(sync_directory)
-
-            with file_hashes_lock:
-                old_files = set(file_hashes.keys())
-                new_files = set(current_files.keys())
-
-                added = new_files - old_files
-                removed = old_files - new_files
-                potentially_modified = old_files & new_files
-
-                for filepath in added:
-                    RNS.log(f"New file detected: {filepath}", RNS.LOG_INFO)
-                    file_hashes[filepath] = current_files[filepath]
-
-                for filepath in removed:
-                    RNS.log(f"File removed: {filepath}", RNS.LOG_INFO)
-                    del file_hashes[filepath]
-
-                modified = []
-                for filepath in potentially_modified:
-                    if file_hashes[filepath]["hash"] != current_files[filepath]["hash"]:
-                        RNS.log(f"File modified: {filepath}", RNS.LOG_INFO)
-                        file_hashes[filepath] = current_files[filepath]
-                        modified.append(filepath)
-
-            if added or removed or modified:
-                save_hash_db(sync_directory)
-
-                if tui:
-                    tui.update_status(files=len(file_hashes))
-                    tui.update_file_list(sync_directory)
-
-                for filepath in added:
-                    broadcast_file_update(filepath)
-
-                for filepath in removed:
-                    broadcast_file_deletion(filepath)
-
-                for filepath in modified:
-                    broadcast_file_update(filepath)
-
-            time.sleep(SCAN_INTERVAL)
-
-        except Exception as e:
-            RNS.log(f"File monitor error: {e}", RNS.LOG_DEBUG)
-            time.sleep(1)
+        _file_monitor_iteration()
+        time.sleep(SCAN_INTERVAL)
 
 
 def connect_to_peer(peer_hash_hex):
@@ -2538,7 +2572,7 @@ def start_peer(
 
     if use_tui:
         tui = SimpleTUI()
-        RNS.loglevel = RNS.LOG_VERBOSE
+        RNS.loglevel = RNS.LOG_INFO
         original_rns_log = RNS.log
         RNS.log = rns_log_hook
         tui.add_log("Initializing RNS FileSync...", RNS.LOG_NOTICE)
@@ -3023,13 +3057,18 @@ def main():
     args = parser.parse_args()
 
     if args.verbose == 1:
-        loglevel = RNS.LOG_INFO
-    elif args.verbose == 2:
         loglevel = RNS.LOG_VERBOSE
-    elif args.verbose >= 3:
+    elif args.verbose == 2:
         loglevel = RNS.LOG_DEBUG
+    elif args.verbose >= 3:
+        loglevel = RNS.LOG_EXTREME
     else:
-        loglevel = RNS.LOG_NOTICE
+        loglevel = RNS.LOG_INFO
+
+    # Force lower log level if TUI is enabled to prevent screen corruption
+    # unless explicitly overridden by verbose flags
+    if not args.no_tui and args.verbose == 0:
+        loglevel = RNS.LOG_INFO
 
     RNS.loglevel = loglevel
 
