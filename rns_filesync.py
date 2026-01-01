@@ -62,6 +62,12 @@ active_outgoing_transfers_lock = threading.Lock()
 active_resources = {}
 active_resources_lock = threading.Lock()
 
+active_incoming_transfers = {}
+active_incoming_transfers_lock = threading.Lock()
+
+active_connection_attempts = set()
+active_connection_attempts_lock = threading.Lock()
+
 
 _IS_WINDOWS = platform.system() == "Windows"
 _COLOR_DISABLED = _IS_WINDOWS or not sys.stdout.isatty()
@@ -413,13 +419,13 @@ class SimpleTUI:
                     left_pad = (width - len(title_text) - 2) // 2
                     right_pad = width - len(title_text) - left_pad - 2
                     sys.stdout.write(
-                        f"{top_left}{horizontal * left_pad}{title_text}{horizontal * right_pad}{top_right}"
+                        f"{top_left}{horizontal * left_pad}{title_text}{horizontal * right_pad}{top_right}",
                     )
                 else:
                     sys.stdout.write(f"{top_left}{horizontal * (width - 2)}{top_right}")
             elif i == height - 1:
                 sys.stdout.write(
-                    f"{bottom_left}{horizontal * (width - 2)}{bottom_right}"
+                    f"{bottom_left}{horizontal * (width - 2)}{bottom_right}",
                 )
             else:
                 sys.stdout.write(f"{vertical}{' ' * (width - 2)}{vertical}")
@@ -1128,7 +1134,7 @@ def peer_connected(link):
                 (
                     RNS.hexrep(dest_hash, delimit=False),
                     RNS.hexrep(identity_hash, delimit=False),
-                )
+                ),
             )
 
     link.set_link_closed_callback(peer_disconnected)
@@ -1387,6 +1393,15 @@ def request_file(link, filepath):
         filepath: Relative path of the file to request.
 
     """
+    with active_incoming_transfers_lock:
+        if filepath in active_incoming_transfers:
+            RNS.log(
+                f"Transfer already in progress for {filepath}, skipping request",
+                RNS.LOG_DEBUG,
+            )
+            return
+        active_incoming_transfers[filepath] = time.time()
+
     try:
         RNS.log(f"Requesting file from peer: {filepath}", RNS.LOG_INFO)
         data = umsgpack.packb(
@@ -1409,6 +1424,15 @@ def request_file_blocks(link, filepath):
         filepath: Relative path of the file.
 
     """
+    with active_incoming_transfers_lock:
+        if filepath in active_incoming_transfers:
+            RNS.log(
+                f"Delta transfer already in progress for {filepath}, skipping request",
+                RNS.LOG_DEBUG,
+            )
+            return
+        active_incoming_transfers[filepath] = time.time()
+
     try:
         full_path = os.path.join(sync_directory, filepath)
         local_blocks = hash_blocks(full_path) if os.path.exists(full_path) else []
@@ -1438,19 +1462,30 @@ def handle_file_request(data, link):
     if not filepath:
         return
 
-    transfer_key = (id(link), filepath)
+    try:
+        remote_identity = link.get_remote_identity()
+        peer_id = (
+            RNS.hexrep(remote_identity.hash, delimit=False)
+            if remote_identity
+            else RNS.hexrep(link.destination.hash, delimit=False)
+        )
+    except Exception:
+        peer_id = RNS.hexrep(link.destination.hash, delimit=False)
+
+    transfer_key = (peer_id, filepath)
 
     with active_outgoing_transfers_lock:
         if transfer_key in active_outgoing_transfers:
-            RNS.log(
-                f"Transfer already in progress for {filepath}, ignoring duplicate request",
-                RNS.LOG_DEBUG,
-            )
-            return
+            # Check timeout for stale entries (24 hours)
+            if time.time() - active_outgoing_transfers[transfer_key] < 86400.0:
+                RNS.log(
+                    f"Transfer already in progress for {filepath} to {peer_id[:16]}, ignoring duplicate request",
+                    RNS.LOG_DEBUG,
+                )
+                return
         active_outgoing_transfers[transfer_key] = time.time()
 
     try:
-        remote_identity = link.get_remote_identity()
         if remote_identity and whitelist_enabled:
             if not check_permission(remote_identity.hash, "read"):
                 RNS.log(
@@ -1520,7 +1555,7 @@ def handle_file_request(data, link):
                         "type": "empty_file",
                         "path": filepath,
                         "hash": file_hash,
-                    }
+                    },
                 )
 
                 packet = RNS.Packet(link, empty_file_data)
@@ -1549,7 +1584,7 @@ def handle_file_request(data, link):
                     with transfer_stats_lock:
                         progress = resource.get_progress()
                         transfer_stats["last_transfer_bytes"] = int(
-                            progress * file_size
+                            progress * file_size,
                         )
                         if tui:
                             elapsed = time.time() - start_time
@@ -1598,19 +1633,29 @@ def handle_delta_request(data, link):
     if not filepath:
         return
 
-    transfer_key = (id(link), filepath, "delta")
+    try:
+        remote_identity = link.get_remote_identity()
+        peer_id = (
+            RNS.hexrep(remote_identity.hash, delimit=False)
+            if remote_identity
+            else RNS.hexrep(link.destination.hash, delimit=False)
+        )
+    except Exception:
+        peer_id = RNS.hexrep(link.destination.hash, delimit=False)
+
+    transfer_key = (peer_id, filepath)
 
     with active_outgoing_transfers_lock:
         if transfer_key in active_outgoing_transfers:
-            RNS.log(
-                f"Delta transfer already in progress for {filepath}, ignoring duplicate request",
-                RNS.LOG_DEBUG,
-            )
-            return
+            if time.time() - active_outgoing_transfers[transfer_key] < 86400.0:
+                RNS.log(
+                    f"Delta transfer already in progress for {filepath} to {peer_id[:16]}, ignoring duplicate request",
+                    RNS.LOG_DEBUG,
+                )
+                return
         active_outgoing_transfers[transfer_key] = time.time()
 
     try:
-        remote_identity = link.get_remote_identity()
         if remote_identity and whitelist_enabled:
             if not check_permission(remote_identity.hash, "read"):
                 RNS.log(
@@ -1739,7 +1784,7 @@ def resource_callback(resource_advertisement):
 
         if not whitelist_enabled:
             RNS.log(
-                f"Accepting resource ({data_size} bytes, no whitelist)", RNS.LOG_INFO
+                f"Accepting resource ({data_size} bytes, no whitelist)", RNS.LOG_INFO,
             )
             return True
 
@@ -1773,6 +1818,20 @@ def resource_started(resource):
         f"Resource transfer started: size={size}, total_size={total_size}, parts={parts}, has_metadata={has_meta}",
         RNS.LOG_INFO,
     )
+
+    start_time = time.time()
+
+    def progress_callback(res):
+        if tui:
+            with transfer_stats_lock:
+                progress = res.get_progress()
+                current_bytes = int(progress * total_size)
+                elapsed = time.time() - start_time
+                if elapsed > 0:
+                    speed = current_bytes / elapsed
+                    tui.update_status(speed=speed)
+
+    resource.progress_callback(progress_callback)
 
 
 def resource_concluded(resource):
@@ -1819,10 +1878,12 @@ def resource_concluded(resource):
                         )
                 except Exception as e:
                     RNS.log(
-                        f"Could not decode filepath from metadata: {e}", RNS.LOG_DEBUG
+                        f"Could not decode filepath from metadata: {e}", RNS.LOG_DEBUG,
                     )
 
             if filepath:
+                with active_incoming_transfers_lock:
+                    active_incoming_transfers.pop(filepath, None)
                 RNS.log(
                     f"Resource transfer failed for {filepath}: status={status_name}, size={size}, parts={parts}",
                     RNS.LOG_ERROR,
@@ -1882,7 +1943,7 @@ def resource_concluded(resource):
         if resource.metadata.get("mode") == "delta":
             block_list = resource.metadata.get("blocks", [])
             RNS.log(
-                f"Applying {len(block_list)} delta blocks to {filepath}", RNS.LOG_INFO
+                f"Applying {len(block_list)} delta blocks to {filepath}", RNS.LOG_INFO,
             )
 
             with open(full_path, "r+b") as f:
@@ -1923,6 +1984,9 @@ def resource_concluded(resource):
                     "mtime": time.time(),
                 }
             save_hash_db(sync_directory)
+
+            with active_incoming_transfers_lock:
+                active_incoming_transfers.pop(filepath, None)
 
             broadcast_file_update(filepath, exclude_link=resource.link)
 
@@ -2012,7 +2076,7 @@ def handle_file_update_notification(data, link):
 
     if not peer_info:
         RNS.log(
-            f"Received file update without peer_info for {filepath}", RNS.LOG_WARNING
+            f"Received file update without peer_info for {filepath}", RNS.LOG_WARNING,
         )
         return
 
@@ -2169,25 +2233,49 @@ def peer_reconnection_loop():
 
             with connected_peers_lock:
                 connected_hashes = set()
+                connected_dest_hashes = set()
                 for link in connected_peers:
-                    if link.status == RNS.Link.ACTIVE:
+                    if link.status in (RNS.Link.ACTIVE, RNS.Link.HANDSHAKE):
+                        try:
+                            connected_dest_hashes.add(
+                                RNS.hexrep(link.destination.hash, delimit=False),
+                            )
+                        except Exception:
+                            pass
+
                         try:
                             remote_id = link.get_remote_identity()
                             if remote_id:
                                 connected_hashes.add(
-                                    RNS.hexrep(remote_id.hash, delimit=False)
+                                    RNS.hexrep(remote_id.hash, delimit=False),
                                 )
                         except Exception:
                             pass
 
             for dest_hash, identity_hash in peers_to_check:
-                if identity_hash not in connected_hashes:
+                if (
+                    identity_hash not in connected_hashes
+                    and dest_hash not in connected_dest_hashes
+                ):
+                    with active_connection_attempts_lock:
+                        if dest_hash in active_connection_attempts:
+                            continue
+                        active_connection_attempts.add(dest_hash)
+
                     RNS.log(
                         f"Peer {identity_hash[:16]}... disconnected, attempting reconnect",
                         RNS.LOG_INFO,
                     )
+
+                    def reconnect_job(d_hash):
+                        try:
+                            connect_to_peer(d_hash)
+                        finally:
+                            with active_connection_attempts_lock:
+                                active_connection_attempts.discard(d_hash)
+
                     threading.Thread(
-                        target=connect_to_peer,
+                        target=reconnect_job,
                         args=(dest_hash,),
                         daemon=True,
                     ).start()
@@ -2268,6 +2356,22 @@ def connect_to_peer(peer_hash_hex):
         RNS.log(f"Invalid peer hash: {e}", RNS.LOG_ERROR)
         return None
 
+    with connected_peers_lock:
+        for link in connected_peers:
+            if link.status in (RNS.Link.ACTIVE, RNS.Link.HANDSHAKE):
+                try:
+                    if (
+                        RNS.hexrep(link.destination.hash, delimit=False)
+                        == peer_hash_hex
+                    ):
+                        RNS.log(
+                            f"Link already active or being established to {peer_hash_hex[:16]}",
+                            RNS.LOG_DEBUG,
+                        )
+                        return link
+                except Exception:
+                    pass
+
     if not RNS.Transport.has_path(peer_hash):
         RNS.log(f"Finding path to peer {RNS.prettyhexrep(peer_hash)}...", RNS.LOG_INFO)
         RNS.Transport.request_path(peer_hash)
@@ -2341,7 +2445,7 @@ def connect_to_peer(peer_hash_hex):
                     (
                         RNS.hexrep(dest_hash, delimit=False),
                         RNS.hexrep(identity_hash, delimit=False),
-                    )
+                    ),
                 )
                 RNS.log(
                     f"Added peer to desired peers: {RNS.prettyhexrep(identity_hash)}",
@@ -2356,7 +2460,7 @@ def connect_to_peer(peer_hash_hex):
             request_file_list_from_peer(link, browser_mode=False)
         else:
             RNS.log(
-                "Peer does not have read permission, skipping file list", RNS.LOG_INFO
+                "Peer does not have read permission, skipping file list", RNS.LOG_INFO,
             )
     except Exception as e:
         RNS.log(f"Error setting up file sync on connect: {e}", RNS.LOG_DEBUG)
@@ -2652,7 +2756,7 @@ def start_peer(
                                                 tui.remote_files = []
 
                                         request_file_list_from_peer(
-                                            link, browser_mode=True
+                                            link, browser_mode=True,
                                         )
                                         RNS.log(
                                             f"Browsing peer {peer_idx}: {RNS.prettyhexrep(peer_hash)}",
@@ -2684,7 +2788,7 @@ def start_peer(
                                             with tui.remote_files_lock:
                                                 tui.remote_files = []
                                         request_file_list_from_peer(
-                                            link, browser_mode=True
+                                            link, browser_mode=True,
                                         )
                                         RNS.log(
                                             f"Browsing peer: {RNS.prettyhexrep(peer_hash)}",
@@ -2779,7 +2883,7 @@ def start_peer(
                                             peer_tuple = (
                                                 RNS.hexrep(dest_hash, delimit=False),
                                                 RNS.hexrep(
-                                                    identity_hash, delimit=False
+                                                    identity_hash, delimit=False,
                                                 ),
                                             )
                                             if peer_tuple in desired_peers:
