@@ -39,8 +39,17 @@ pipx install rns
 ### Installation
 
 ```bash
-git clone https://github.com/Sudo-Ivan/RNS-Filesync.git
+git clone https://github.com/Quad4-Software/RNS-Filesync.git
 cd RNS-Filesync
+pip install -r requirements.txt --break-system-packages
+```
+
+Or clone via SSH:
+
+```bash
+git clone git@github.com:Quad4-Software/RNS-Filesync.git
+cd RNS-Filesync
+pip install -r requirements.txt --break-system-packages
 ```
 
 ### Basic Usage
@@ -69,10 +78,15 @@ While running, you can type commands at the prompt:
 
 - `status` - Show file count and connected peers
 - `peers` - List all connected peers with their hashes
-- `browse 0` - Browse files on peer 0
-- `download filename.txt` - Download a specific file from browsed peer
-- `logs` - View detailed log messages
-- `quit` - Exit the application
+- `connect <hash>` - Connect to a peer by destination hash
+- `disconnect <index>` - Disconnect from a peer by index (see `peers`)
+- `browse <index|hash>` - Browse files on a connected peer
+- `download <file>` - Download a file from the browsed peer
+- `download_all` - Download all files from the browsed peer
+- `announce` - Manually announce this peer on the network
+- `logs` - Switch to the log view (TUI)
+- `files` - Switch back to the file view (TUI)
+- `quit` - Exit the application (`exit` or `q` also work)
 
 ## Command-Line Options
 
@@ -80,7 +94,8 @@ While running, you can type commands at the prompt:
 -d PATH              Directory to synchronize (required)
 -i NAME              Identity name to use (default: rns_filesync)
 -p HASH              Peer destination hash to connect to (can specify multiple times)
--n                   Disable file monitoring (one-time sync only)
+-n                   Disable file monitoring (sync on connect only)
+-a SECONDS           Announce interval in seconds (default: 300)
 --permissions-file FILE  Load permissions from file
 --allow HASH         Allow specific peer identity hash
 --perms LIST         Permissions for --allow (comma-separated: read,write,delete)
@@ -92,6 +107,8 @@ While running, you can type commands at the prompt:
 ## Permissions and Access Control
 
 Control who can read, write, or delete files with a permissions file.
+
+See `permissions.example` for a template.
 
 **Create `permissions.conf`:**
 

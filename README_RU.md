@@ -1,5 +1,7 @@
 # RNS FileSync
 
+[English](README.md)
+
 > [!ПРЕДУПРЕЖДЕНИЕ]
 > Я все еще считаю этот проект экспериментальным, используйте на свой страх и риск.
 
@@ -37,8 +39,17 @@ pipx install rns
 ### Установка
 
 ```bash
-git clone https://github.com/Sudo-Ivan/RNS-Filesync.git
+git clone https://github.com/Quad4-Software/RNS-Filesync.git
 cd RNS-Filesync
+pip install -r requirements.txt --break-system-packages
+```
+
+Или клонирование по SSH:
+
+```bash
+git clone git@github.com:Quad4-Software/RNS-Filesync.git
+cd RNS-Filesync
+pip install -r requirements.txt --break-system-packages
 ```
 
 ### Основное использование
@@ -67,10 +78,15 @@ python rns_filesync.py -d ~/shared -p <destination_hash_from_peer1>
 
 - `status` - Показать количество файлов и подключенных пиров
 - `peers` - Список всех подключенных пиров с их хешами
-- `browse 0` - Просмотр файлов на пире 0
-- `download filename.txt` - Скачать конкретный файл с просматриваемого пира
-- `logs` - Просмотр подробных сообщений журнала
-- `quit` - Выйти из приложения
+- `connect <hash>` - Подключиться к пиру по хешу назначения
+- `disconnect <index>` - Отключиться от пира по индексу (см. `peers`)
+- `browse <index|hash>` - Просмотр файлов на подключенном пире
+- `download <file>` - Скачать файл с просматриваемого пира
+- `download_all` - Скачать все файлы с просматриваемого пира
+- `announce` - Вручную объявить этот пир в сети
+- `logs` - Переключиться на просмотр журнала (TUI)
+- `files` - Вернуться к просмотру файлов (TUI)
+- `quit` - Выйти из приложения (также `exit` или `q`)
 
 ## Параметры командной строки
 
@@ -78,7 +94,8 @@ python rns_filesync.py -d ~/shared -p <destination_hash_from_peer1>
 -d PATH              Каталог для синхронизации (обязательно)
 -i NAME              Имя идентификатора (по умолчанию: rns_filesync)
 -p HASH              Хеш назначения пира для подключения (можно указывать несколько раз)
--n                   Отключить мониторинг файлов (только разовая синхронизация)
+-n                   Отключить мониторинг файлов (синхронизация только при подключении)
+-a SECONDS           Интервал объявления в сети в секундах (по умолчанию: 300)
 --permissions-file FILE  Загрузить права доступа из файла
 --allow HASH         Разрешить конкретный хеш идентификатора пира
 --perms LIST         Права для --allow (через запятую: read,write,delete)
@@ -90,6 +107,8 @@ python rns_filesync.py -d ~/shared -p <destination_hash_from_peer1>
 ## Права доступа и контроль доступа
 
 Управляйте тем, кто может читать, записывать или удалять файлы с помощью файла прав доступа.
+
+См. `permissions.example` в качестве шаблона.
 
 **Создайте `permissions.conf`:**
 
@@ -161,4 +180,12 @@ RNS FileSync следит за каталогом на вашем устройс
 - `file_complete` - Сигнал завершения передачи с финальным хешем
 - `file_update` - Уведомление пиров о локальном изменении файла
 - `file_deletion` - Уведомление пиров об удалении локального файла
+
+## Лицензия
+
+RNS FileSync распространяется под лицензией [BSD-2-Clause](LICENSE).
+
+## Зависимости
+
+`rns` (Reticulum) - [Лицензия Reticulum](https://raw.githubusercontent.com/markqvist/Reticulum/refs/heads/master/LICENSE)
 
