@@ -1,190 +1,141 @@
 # RNS FileSync
 
-[Русская](README_RU.md)
+Decentralized peer-to-peer file synchronization over the Reticulum Network Stack.
 
-> [!WARNING]  
-> I still consider this experimental, use at your own risk.
+This package is designed as an embeddable library for host programs such as
+MeshChatX, with a thin CLI for standalone use. There is no TUI.
 
-**Decentralized peer-to-peer file synchronization using the Reticulum Network Stack**
-
-RNS FileSync enables automatic file synchronization between devices without requiring central servers, internet connectivity, or cloud services. It works over any network medium supported by Reticulum, including radio, LoRa, WiFi, or the internet, making it ideal for off-grid, privacy-focused, and resilient file sharing.
+For usability and easy usage this follows rngit permissions and configuration.
 
 ## Features
 
-- **Peer-to-Peer**: No central servers or coordination required
-- **Bandwidth Efficient**: Delta sync transmits only changed blocks, not entire files
-- **Works Anywhere**: Operates over radio, LoRa, mesh networks, or internet
-- **Automatic Sync**: Monitors directories and syncs changes in real-time
-- **Permission System**: Fine-grained access control (read/write/delete)
-- **Terminal UI**: Built-in text interface for monitoring and management
-- **Multi-Peer**: Connect to multiple peers simultaneously with mesh distribution
-- **Cryptographically Secure**: End-to-end encrypted via Reticulum's transport layer
+- Peer-to-peer sync with no central server
+- Delta sync for changed blocks
+- Path-jailed writes and rngit-style ACL (`permission:target`)
+- Embed-safe: reuses an existing `RNS.Reticulum` instance when present
+- Works over any Reticulum medium (radio, LoRa, WiFi, internet)
 
-## Quick Start
-
-### Prerequisites
-
-Install Reticulum Network Stack:
+## Install
 
 ```bash
-pip install rns --break-system-packages
+pip install -e ".[dev]"
 ```
 
-Or using pipx:
+Requires `rns>=1.3.9`. Current package version: **1.0.0**.
+
+## Config
+
+FileSync uses an rngit-like config directory (default `~/.rns_filesync/`):
 
 ```bash
-pipx install rns
+rns-filesync -d ~/shared
+# creates ~/.rns_filesync/config on first run
 ```
 
-### Installation
+| Flag | Meaning |
+|------|---------|
+| `--config DIR` | FileSync config directory (default `~/.rns_filesync`) |
+| `--rnsconfig DIR` | Reticulum config directory (default `~/.reticulum`) |
+| `-d DIR` | Sync directory (overrides `[filesync] directory`) |
+
+Example `~/.rns_filesync/config`:
+
+```ini
+[filesync]
+announce_interval = 300
+# directory = ~/shared
+identity = rns_filesync
+# peers = 9710b86ba12c42d1d8f30f74fe509286
+# blocked_identities = d31aeea49873006f13b3415520666a4e
+
+[aliases]
+# alice = d09285e660cfe27cee6d9a0beb58b7e0
+
+[access]
+# sync = r:all, w:9710b86ba12c42d1d8f30f74fe509286, d:9710b86ba12c42d1d8f30f74fe509286
+
+[logging]
+loglevel = 4
+```
+
+Identities are stored under `~/.rns_filesync/identities/`.
+
+## Permissions
+
+Same rule form as rngit: `permission:target`.
+
+| Perm | Meaning |
+|------|---------|
+| `r` | read |
+| `w` | write |
+| `d` | delete |
+| `rw` | read/write |
+| `rwd` | read/write/delete |
+| `adm` | admin (all) |
+
+Targets: identity hash, alias, `all`, or `none`.
+
+When any ACL rule is loaded, access is **deny by default**. With no rules configured, the peer stays open (library/embed default).
+
+Sidecar `.allowed` files (first found wins alongside config `[access]`):
+
+- `<sync_dir>.allowed`
+- `<parent>/<name>.allowed`
+- `<sync_dir>/.allowed`
+
+See `permissions.example`.
 
 ```bash
-git clone https://github.com/Quad4-Software/RNS-Filesync.git
-cd RNS-Filesync
-pip install -r requirements.txt --break-system-packages
+rns-filesync -d ~/shared --allow r:all --allow w:9710b86ba12c42d1d8f30f74fe509286
 ```
 
-Or clone via SSH:
+## CLI
 
 ```bash
-git clone git@github.com:Quad4-Software/RNS-Filesync.git
-cd RNS-Filesync
-pip install -r requirements.txt --break-system-packages
+rns-filesync -d ~/shared
+rns-filesync -d ~/shared -p <peer_identity_hash>
+rns-filesync --config ~/.rns_filesync --rnsconfig ~/.reticulum -d ~/shared
 ```
 
-### Basic Usage
+`-p` expects a peer **identity hash**. A destination hash is accepted as fallback
+after the peer has announced.
 
-**1. Start your first peer:**
+Interactive commands: `status`, `peers`, `files`, `connect`, `disconnect`,
+`browse`, `download`, `announce`, `quit`.
+
+## Library embed (MeshChatX-style)
+
+```python
+from rns_filesync import FileSyncService
+from rns_filesync.permissions import PermissionStore
+
+perms = PermissionStore()
+perms.add_rule("r:all")
+perms.add_rule("w:9710b86ba12c42d1d8f30f74fe509286")
+
+service = FileSyncService(
+    identity=host_identity,
+    sync_directory="/path/to/sync",
+    reticulum=existing_reticulum,
+    permissions=perms,
+)
+dest_hash = service.start(monitor=True)
+service.connect_peer(peer_identity_hash)
+service.stop()
+```
+
+Keep aspect `rns_filesync.filesync` for wire compatibility.
+
+## Tests
 
 ```bash
-python rns_filesync.py -d ~/shared
+pytest -m "not live and not exploratory"
+pytest -m e2e
+pytest -m live
 ```
 
-This creates a sync directory and displays your peer's destination hash in the Terminal UI.
-
-**2. Start a second peer and connect:**
-
-On another device (or terminal), run:
-
-```bash
-python rns_filesync.py -d ~/shared -p <destination_hash_from_peer1>
-```
-
-Your files will automatically sync between both directories. Add, modify, or delete files in either directory and watch them sync.
-
-### Interactive Commands
-
-While running, you can type commands at the prompt:
-
-- `status` - Show file count and connected peers
-- `peers` - List all connected peers with their hashes
-- `connect <hash>` - Connect to a peer by destination hash
-- `disconnect <index>` - Disconnect from a peer by index (see `peers`)
-- `browse <index|hash>` - Browse files on a connected peer
-- `download <file>` - Download a file from the browsed peer
-- `download_all` - Download all files from the browsed peer
-- `announce` - Manually announce this peer on the network
-- `logs` - Switch to the log view (TUI)
-- `files` - Switch back to the file view (TUI)
-- `quit` - Exit the application (`exit` or `q` also work)
-
-## Command-Line Options
-
-```
--d PATH              Directory to synchronize (required)
--i NAME              Identity name to use (default: rns_filesync)
--p HASH              Peer destination hash to connect to (can specify multiple times)
--n                   Disable file monitoring (sync on connect only)
--a SECONDS           Announce interval in seconds (default: 300)
---permissions-file FILE  Load permissions from file
---allow HASH         Allow specific peer identity hash
---perms LIST         Permissions for --allow (comma-separated: read,write,delete)
---no-tui             Disable Terminal UI, use plain logging
--v                   Verbose logging (-vv for more, -vvv for debug)
---config PATH        Path to Reticulum config directory
-```
-
-## Permissions and Access Control
-
-Control who can read, write, or delete files with a permissions file.
-
-See `permissions.example` for a template.
-
-**Create `permissions.conf`:**
-
-```
-# Allow specific peer full access
-a1b2c3d4e5f6g7h8 read,write,delete
-
-# Read-only access for another peer
-9876543210fedcba read
-
-# Allow anyone to read (wildcard)
-* read
-```
-
-**Use with:**
-
-```bash
-python rns_filesync.py -d ~/shared --permissions-file permissions.conf
-```
-
-**Or via command line:**
-
-```bash
-python rns_filesync.py -d ~/shared --allow a1b2c3d4e5f6g7h8 --perms read,write
-```
-
-### Permission Types
-
-- `read` - Peer can list and download files
-- `write` - Peer can upload and modify files
-- `delete` - Peer can delete files
-
-Without a permissions file, all peers have full access.
-
-## How It Works
-
-RNS FileSync watches a directory on your device. When you add or change a file, it automatically sends it to connected peers. When a peer adds or changes a file, you automatically receive it.
-
-#### Architecture
-
-**Transport Layer**: Built on Reticulum Network Stack (RNS) for cryptographic identity-based addressing and transport encryption.
-
-**File Change Detection**: Monitors sync directory every 5 seconds using filesystem scans with SHA-256 hash comparison.
-
-**Delta Synchronization Protocol**:
-1. Files divided into 4KB blocks (`BLOCK_SIZE = 4096`)
-2. Each block independently hashed with SHA-256
-3. Block hashes exchanged with peers
-4. Only blocks with differing hashes transmitted
-5. Receiver applies delta patches to existing files
-
-**Packet Fragmentation**: 
-- Large file transfers use `RNS.Resource` with automatic chunking
-- Delta blocks split into 256-byte sub-chunks (`MAX_PACKET_DATA_SIZE`)
-- Sub-chunks sent as individual packets, reassembled on receive
-- Verified with SHA-256 hash post-assembly
-
-**Conflict Resolution**: Last-write-wins strategy. Most recent change propagates to all peers.
-
-**Mesh Distribution**: Files propagate transitively through connected peers. If A connects to B, and B connects to C, files sync A↔B↔C.
-
-#### Message Types
-
-- `file_list` - Inventory of files with hashes
-- `file_list_request` - Request peer's file list
-- `file_request` - Request full file transfer
-- `delta_request` - Request delta blocks for existing file
-- `file_chunk` - Transfer file/delta data payload
-- `file_complete` - Signal transfer completion with final hash
-- `file_update` - Notify peers of local file change
-- `file_deletion` - Notify peers of local file deletion
+Markers: `unit`, `acceptance`, `smoke`, `e2e`, `fuzz`, `live`, `exploratory`.
 
 ## License
 
-RNS FileSync is licensed under [BSD-2-Clause](LICENSE).
-
-## Dependencies
-
-`rns` (Reticulum) - [Reticulum License](https://raw.githubusercontent.com/markqvist/Reticulum/refs/heads/master/LICENSE)
+BSD-2-Clause. See LICENSE.

@@ -1,33 +1,35 @@
-# RNS FileSync Permissions File
+# RNS FileSync access file (.allowed)
 #
-# Format: identity_hash permissions
-# Permissions: read, write, delete (comma-separated)
+# Same rule format as rngit: permission:target (one rule per line).
+# You can also put comma-separated rules on one line.
 #
-# Lines starting with # are comments
-# Whitespace and empty lines are ignored
+# Place this file as:
+#   <sync_dir>.allowed
+#   <parent>/<sync_dir_name>.allowed
+#   <sync_dir>/.allowed
+#
+# Permissions:
+#   r   = read
+#   w   = write
+#   d   = delete
+#   rw  = read/write
+#   rwd = read/write/delete
+#   adm = admin (all)
+#
+# Targets: identity hash, alias from config, all, or none.
+#
+# Default is deny until rules are added.
 
-# Examples:
+# Public read-only
+# r:all
 
-# Full access for a specific peer
-# b559704616f042e0b7b6ba46ada4c670 read,write,delete
+# Full access for one peer
+# rwd:b559704616f042e0b7b6ba46ada4c670
 
-# Read-only access for a peer
-# b559704616f042e0b7b6ba46ada4c670 read
+# Read/write for one peer, read for everyone
+r:all
+w:b559704616f042e0b7b6ba46ada4c670
+d:b559704616f042e0b7b6ba46ada4c670
 
-# Read and write, but no delete
-# b559704616f042e0b7b6ba46ada4c670 read,write
-
-# Wildcard: allow all peers with specific permissions
-# Use * to allow any peer to connect with the specified permissions
-# * read
-
-# Public read-only server (anyone can download files)
-# * read
-
-# Semi-public (anyone can read/write, but not delete)
-# * read,write
-
-# Private: Only specific peers (no wildcard)
-b559704616f042e0b7b6ba46ada4c670 read,write,delete
-20d1f3debb50dde3df2cff74413b0f0d read,write
-
+# Or combined:
+# r:all, rw:20d1f3debb50dde3df2cff74413b0f0d
