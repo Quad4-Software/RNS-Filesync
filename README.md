@@ -3,7 +3,7 @@
 Decentralized peer-to-peer file synchronization over the Reticulum Network Stack.
 
 This package is designed as an embeddable library for host programs such as
-MeshChatX, with a thin CLI for standalone use. There is no TUI.
+MeshChatX and Sideband, with a thin CLI for standalone use. There is no TUI.
 
 For usability and easy usage this follows rngit permissions and configuration.
 
@@ -11,17 +11,52 @@ For usability and easy usage this follows rngit permissions and configuration.
 
 - Peer-to-peer sync with no central server
 - Delta sync for changed blocks
-- Path-jailed writes and rngit-style ACL (`permission:target`)
-- Embed-safe: reuses an existing `RNS.Reticulum` instance when present
+- Path-jailed writes and rngit-style ACL (permission:target)
+- Embed-safe: reuses an existing RNS.Reticulum instance when present
 - Works over any Reticulum medium (radio, LoRa, WiFi, internet)
+- Daemon mode via --no-repl for init systems and containers
 
 ## Install
 
+Over Reticulum with pip-rns (no internet required once you have a path):
+
 ```bash
-pip install -e ".[dev]"
+pip-rns install rns://06a54b505bb67b25ef3f8097e8001edc/public/rns-filesync --pipx
 ```
 
-Requires `rns>=1.3.9`. Current package version: **1.0.0**.
+From a release wheel over Reticulum (no source build):
+
+```bash
+pip-rns install --from-release rns://06a54b505bb67b25ef3f8097e8001edc/public/rns-filesync --ref v1.0.0 --pipx
+```
+
+From GitHub with pipx:
+
+```bash
+pipx install git+https://github.com/Quad4-Software/RNS-Filesync
+```
+
+From a local wheel:
+
+```bash
+make wheel
+pipx install dist/rns_filesync-*.whl
+# or: pip install dist/rns_filesync-*.whl
+```
+
+From a local checkout (development):
+
+```bash
+pip install -e ".[dev]"
+# or: make install-user
+```
+
+Requires rns>=1.3.9. Current package version: **1.0.0**.
+
+```bash
+rns-filesync -v
+# rns-filesync 1.0.0 | built 2026-07-19T12:00:00Z | commit abc1234
+```
 
 ## Config
 
@@ -95,13 +130,26 @@ rns-filesync -d ~/shared --allow r:all --allow w:9710b86ba12c42d1d8f30f74fe50928
 rns-filesync -d ~/shared
 rns-filesync -d ~/shared -p <peer_identity_hash>
 rns-filesync --config ~/.rns_filesync --rnsconfig ~/.reticulum -d ~/shared
+rns-filesync -v
+rns-filesync --version
 ```
+
+`-v` / `--version` prints version, bake build date, and git commit when available.
 
 `-p` expects a peer **identity hash**. A destination hash is accepted as fallback
 after the peer has announced.
 
 Interactive commands: `status`, `peers`, `files`, `connect`, `disconnect`,
 `browse`, `download`, `announce`, `quit`.
+
+Logging verbosity uses `--verbose` (repeatable). Quiet mode is `-q`.
+
+## Man page
+
+```bash
+make install-user   # installs man page to ~/.local/share/man/man1/
+man rns-filesync
+```
 
 ## Library embed (MeshChatX-style)
 
@@ -126,15 +174,89 @@ service.stop()
 
 Keep aspect `rns_filesync.filesync` for wire compatibility.
 
+## Sideband plugin
+
+Install `rns-filesync` into the same Python environment Sideband uses, then copy
+the drop-in plugins from `sideband/` into Sideband's plugins directory and
+enable service/command plugins in Sideband settings.
+
+```bash
+# After installing rns-filesync (pip / pipx / pip-rns):
+cp sideband/rns_filesync_service.py ~/.config/sideband/plugins/
+cp sideband/rns_filesync_command.py ~/.config/sideband/plugins/
+```
+
+Set Sideband's plugin path to that directory, enable **service plugins** and
+**command plugins**, then restart Sideband.
+
+The service plugin reuses Sideband's identity and Reticulum instance. Sync
+directory, peers, and ACL come from `~/.rns_filesync/config`. If no directory
+is set there, it defaults to `~/.config/sideband/filesync`.
+
+Remote LXMF commands (from a peer allowed to run Sideband commands):
+
+```text
+filesync status
+filesync peers
+filesync files
+filesync announce
+filesync connect <identity_hash>
+filesync disconnect <peer_id>
+```
+
+## Daemon and packaging
+
+Init units (non-root) live under packaging/ for systemd (system and user),
+OpenRC, dinit, and runit. See packaging/README.md.
+
+```bash
+# system (dedicated rns-filesync user, hardened)
+sudo systemctl enable --now rns-filesync
+
+# or per-user
+systemctl --user enable --now rns-filesync
+```
+
+Daemon entrypoint:
+
+```bash
+rns-filesync -d ~/shared --no-repl -q
+```
+
+## Docker
+
+Rootless multi-stage image and wheel builder under docker/. See docker/README.md.
+
+```bash
+docker build -f docker/Dockerfile -t rns-filesync:1.0.0 .
+```
+
+## Remote management
+
+Reticulum itself has remote management (rnstransport.remote.management with
+rnstatus -R / rnpath -R). File transfer tools like rncp use allow-listed
+identify + request handlers.
+
+For FileSync 1.0:
+
+- Local CLI and embed API cover status, peers, connect, disconnect
+- Sideband LXMF command plugin covers remote control over messaging
+- Native FileSync management destination (Transport-style /status request
+  handlers) is intentionally deferred so 1.0 stays focused on sync + packaging
+
 ## Tests
 
 ```bash
+make test
 pytest -m "not live and not exploratory"
 pytest -m e2e
 pytest -m live
 ```
 
 Markers: `unit`, `acceptance`, `smoke`, `e2e`, `fuzz`, `live`, `exploratory`.
+
+Useful Make targets (aligned with pip-rns): `meta`, `wheel`, `sdist`, `test`,
+`install-user`, `man`, `sign`, `release-rns`, `clean`.
 
 ## License
 

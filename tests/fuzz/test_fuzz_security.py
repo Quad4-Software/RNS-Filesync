@@ -77,7 +77,7 @@ def test_fuzz_acl_matrix_consistency(perms, targets):
     for perm, target in zip(perms, targets, strict=False):
         store.add_rule(f"{perm}:{target}")
     peer = "11" * 16
-    # Invariants: blocked always denies; none on a perm denies that perm.
+    # Invariants: blocked always denies. none on a perm denies that perm.
     if store.enabled:
         for permission in ("read", "write", "delete"):
             allowed = store.check(peer, permission)

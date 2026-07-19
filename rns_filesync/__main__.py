@@ -1,4 +1,4 @@
-"""Module entrypoint: ``python -m rns_filesync``."""
+"""Module entrypoint for python -m rns_filesync."""
 
 from rns_filesync.cli import main
 

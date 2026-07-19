@@ -103,3 +103,42 @@ def test_cli_module_importable():
     help_text = parser.format_help()
     assert "--rnsconfig" in help_text
     assert "--config" in help_text
+    assert "--version" in help_text
+    assert "--verbose" in help_text
+
+
+def test_cli_version_flags(capsys):
+    from rns_filesync import cli
+    from rns_filesync._meta import __version__
+
+    with pytest.raises(SystemExit) as exited:
+        cli.build_parser().parse_args(["-v"])
+    assert exited.value.code == 0
+    out = capsys.readouterr().out
+    assert __version__ in out
+    assert "rns-filesync" in out
+
+    with pytest.raises(SystemExit) as exited:
+        cli.build_parser().parse_args(["--version"])
+    assert exited.value.code == 0
+    assert __version__ in capsys.readouterr().out
+
+
+def test_version_string_includes_baked_fields_when_set(monkeypatch):
+    import rns_filesync._meta as meta
+
+    monkeypatch.setattr(meta, "__version__", "1.0.0")
+    monkeypatch.setattr(meta, "BUILD_DATE", "2026-07-19T12:00:00Z")
+    monkeypatch.setattr(meta, "GIT_COMMIT", "deadbeef")
+    monkeypatch.setattr(meta, "GIT_DIRTY", "0")
+    text = meta.version_string()
+    assert text == "rns-filesync 1.0.0 | built 2026-07-19T12:00:00Z | commit deadbeef"
+
+
+def test_man_page_exists():
+    root = Path(__file__).resolve().parents[2]
+    man = root / "man" / "man1" / "rns-filesync.1"
+    assert man.is_file()
+    text = man.read_text(encoding="utf-8")
+    assert ".TH RNS-FILESYNC" in text
+    assert "--version" in text or "\\-\\-version" in text

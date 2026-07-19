@@ -1,6 +1,6 @@
 """rngit-style access control for FileSync.
 
-Rules use ``permission:target`` (for example ``r:all``, ``w:<hash>``).
+Rules use permission:target (for example r:all, w:<hash>).
 When ACL enforcement is active, access is denied by default.
 """
 
@@ -108,7 +108,7 @@ class PermissionStore:
         return None
 
     def parse_rule(self, rule: str) -> tuple[tuple[str, ...], str] | None:
-        """Parse ``perm:target`` into permission names and resolved target."""
+        """Parse perm:target into permission names and resolved target."""
         rule = rule.strip()
         if not rule or rule.startswith("#"):
             return None

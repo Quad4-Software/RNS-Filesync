@@ -9,6 +9,7 @@ import time
 
 import RNS
 
+from rns_filesync._meta import version_string
 from rns_filesync.config import (
     allowed_sidecar_paths,
     config_get,
@@ -36,6 +37,13 @@ def load_or_create_identity(identity_name: str, identity_dir: str):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="RNS FileSync - peer-to-peer file sync over Reticulum",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=version_string(),
+        help="print version, build date, and commit then exit",
     )
     parser.add_argument(
         "--config",
@@ -100,7 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="rwd",
         help="legacy shorthand for bare --allow hashes (r, w, d, rw, rwd)",
     )
-    parser.add_argument("-v", "--verbose", action="count", default=0)
+    parser.add_argument(
+        "--verbose",
+        action="count",
+        default=0,
+        help="increase logging (use --verbose, repeat for more)",
+    )
     parser.add_argument("-q", "--quiet", action="store_true", help="reduce logging")
     parser.add_argument(
         "--no-repl",
