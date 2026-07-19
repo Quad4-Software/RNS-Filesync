@@ -231,19 +231,6 @@ Rootless multi-stage image and wheel builder under docker/. See docker/README.md
 docker build -f docker/Dockerfile -t rns-filesync:1.0.0 .
 ```
 
-## Remote management
-
-Reticulum itself has remote management (rnstransport.remote.management with
-rnstatus -R / rnpath -R). File transfer tools like rncp use allow-listed
-identify + request handlers.
-
-For FileSync 1.0:
-
-- Local CLI and embed API cover status, peers, connect, disconnect
-- Sideband LXMF command plugin covers remote control over messaging
-- Native FileSync management destination (Transport-style /status request
-  handlers) is intentionally deferred so 1.0 stays focused on sync + packaging
-
 ## Tests
 
 ```bash

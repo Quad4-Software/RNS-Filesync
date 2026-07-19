@@ -82,5 +82,3 @@ pipx install dist/rns_filesync-*.whl
 - The runtime user is filesync (uid 1000). Match host volume ownership.
 - Network is required for Reticulum interfaces you enable in /reticulum/config.
 - Prefer --no-repl for containers and service managers.
-- Native RNS remote-management RPC is not in this image. Use Sideband plugins
-  or the local CLI/API for control in 1.0.
