@@ -6,13 +6,13 @@ Defaults keep editable installs and tests working without a Makefile bake step.
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = '1.0.0'
 
-BUILD_DATE = "unknown"
+BUILD_DATE = '2026-07-19T13:07:05Z'
 
-GIT_COMMIT = "unknown"
+GIT_COMMIT = '652d5fa'
 
-GIT_DIRTY = ""
+GIT_DIRTY = '1'
 
 
 def version_string() -> str:

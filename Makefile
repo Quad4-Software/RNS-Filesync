@@ -14,12 +14,12 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 GIT_DIRTY := $(shell git diff --quiet 2>/dev/null && echo 0 || echo 1)
 
 .PHONY: all clean meta build wheel sdist sign upload release release-rns tag retag \
-	test test-live install install-user man uninstall version help
+	test test-live test-services test-bwrap install install-user man uninstall version help
 
 all: build
 
 help:
-	@echo "Targets: meta build wheel sdist test install install-user man clean release"
+	@echo "Targets: meta build wheel sdist test test-services install install-user man clean release"
 	@echo "Version: $(VERSION)  commit: $(GIT_COMMIT)  built: $(BUILD_DATE)"
 
 version: meta
@@ -76,6 +76,12 @@ test:
 
 test-live:
 	$(PYTHON) -m pytest -m live
+
+test-services:
+	./packaging/docker-test/run-all.sh
+
+test-bwrap:
+	./packaging/docker-test/test-bwrap.sh
 
 install: meta
 	$(PIP) install --break-system-packages .

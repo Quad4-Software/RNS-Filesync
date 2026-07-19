@@ -223,6 +223,29 @@ Daemon entrypoint:
 rns-filesync -d ~/shared --no-repl -q
 ```
 
+Bubblewrap sandbox example (full command in packaging/README.md):
+
+```bash
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/rns-filesync-sandbox"
+mkdir -p "$DATA/config" "$DATA/sync" "$DATA/reticulum"
+
+exec bwrap \
+  --die-with-parent \
+  --new-session \
+  --proc /proc \
+  --dev /dev \
+  --ro-bind / / \
+  --tmpfs /tmp \
+  --bind "$DATA" "$DATA" \
+  --uid "$(id -u)" --gid "$(id -g)" \
+  rns-filesync \
+    --config "$DATA/config" \
+    --rnsconfig "$DATA/reticulum" \
+    -d "$DATA/sync" \
+    --no-repl \
+    -q
+```
+
 ## Docker
 
 Rootless multi-stage image and wheel builder under docker/. See docker/README.md.
@@ -243,7 +266,7 @@ pytest -m live
 Markers: `unit`, `acceptance`, `smoke`, `e2e`, `fuzz`, `live`, `exploratory`.
 
 Useful Make targets (aligned with pip-rns): `meta`, `wheel`, `sdist`, `test`,
-`install-user`, `man`, `sign`, `release-rns`, `clean`.
+`install-user`, `man`, `sign`, `release-rns`, `clean`, `test-services`.
 
 ## License
 

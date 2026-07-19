@@ -70,3 +70,57 @@ sudo ln -s /etc/sv/rns-filesync /var/service/
 System units use NoNewPrivileges, ProtectSystem=strict, empty capability set,
 and ReadWritePaths limited to /var/lib/rns-filesync. Sync ACL still comes from
 ~/.rns_filesync style config under that state directory.
+
+## Sandboxing
+
+For an extra filesystem boundary on a host install (pip, pipx, or package),
+run under Bubblewrap. Network stays shared so Reticulum interfaces keep working.
+Do not add --unshare-net unless you intend to isolate networking.
+
+```bash
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/rns-filesync-sandbox"
+mkdir -p "$DATA/config" "$DATA/sync" "$DATA/reticulum"
+
+exec bwrap \
+  --die-with-parent \
+  --new-session \
+  --proc /proc \
+  --dev /dev \
+  --ro-bind / / \
+  --tmpfs /tmp \
+  --bind "$DATA" "$DATA" \
+  --uid "$(id -u)" --gid "$(id -g)" \
+  rns-filesync \
+    --config "$DATA/config" \
+    --rnsconfig "$DATA/reticulum" \
+    -d "$DATA/sync" \
+    --no-repl \
+    -q
+```
+
+Notes:
+
+- Only "$DATA" is writable. The rest of the root filesystem is read-only.
+- Put config, sync tree, and Reticulum config under "$DATA" so the process
+  does not need write access to your home directory.
+- If rns-filesync lives in a venv outside "$DATA", --ro-bind / / still allows
+  reading it. Bind that path read-write only if the venv must be mutated.
+- For USB radios, device nodes under /dev are available via --dev /dev.
+  Tighten further if your policy requires it.
+- Docker and Podman are a separate isolation model. See docker/README.md.
+
+## Service file tests (Docker)
+
+Run packaging unit tests against appropriate OS images:
+
+| Init | Image |
+|------|-------|
+| systemd | debian:bookworm-slim (+ systemd) |
+| OpenRC | alpine:3.21 |
+| dinit | debian:bookworm-slim (service file + command) |
+| runit | Void Linux (Alpine fallback) |
+
+```bash
+./packaging/docker-test/run-all.sh
+# or: make test-services
+```
